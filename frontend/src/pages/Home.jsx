@@ -203,7 +203,7 @@ const Home = () => {
 
           <div className="flex items-center space-x-6 text-slate-400">
             <a
-              href="https://github.com/manikkori"
+              href="https://github.com/manikkori/codealpha__RealTimeCommunicationApp"
               target="_blank"
               rel="noreferrer"
               className="flex items-center space-x-1.5 hover:text-white transition"
