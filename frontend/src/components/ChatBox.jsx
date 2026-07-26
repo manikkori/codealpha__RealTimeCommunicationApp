@@ -6,6 +6,9 @@ const ChatBox = ({ socket, roomId, user }) => {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef(null);
 
+  const currentUsername =
+    user?.username || `Guest-${Math.floor(Math.random() * 899 + 100)}`;
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -32,7 +35,7 @@ const ChatBox = ({ socket, roomId, user }) => {
     const messageData = {
       roomId,
       message: input.trim(),
-      sender: user?.username || "Anonymous",
+      sender: currentUsername,
       timestamp: new Date().toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
@@ -44,8 +47,8 @@ const ChatBox = ({ socket, roomId, user }) => {
   };
 
   return (
-    <div className="w-full h-full flex flex-col bg-slate-900 border border-slate-800 rounded-sm">
-      <div className="bg-slate-950 border-b border-slate-800 px-4 py-3 flex items-center space-x-2">
+    <div className="w-full h-full flex flex-col bg-slate-900 border border-slate-800 rounded-sm overflow-hidden">
+      <div className="bg-slate-950 border-b border-slate-800 px-4 py-3 flex items-center space-x-2 shrink-0">
         <MessageSquare className="w-4 h-4 text-blue-500" />
         <span className="font-mono text-xs font-bold uppercase tracking-widest text-white">
           Live Data Channel // Chat
@@ -59,7 +62,8 @@ const ChatBox = ({ socket, roomId, user }) => {
           </div>
         ) : (
           messages.map((msg, index) => {
-            const isMe = msg.sender === user?.username;
+            const isMe =
+              msg.sender === currentUsername || msg.sender === user?.username;
             return (
               <div
                 key={index}
@@ -93,7 +97,7 @@ const ChatBox = ({ socket, roomId, user }) => {
 
       <form
         onSubmit={handleSendMessage}
-        className="p-3 bg-slate-950 border-t border-slate-800 flex items-center gap-2"
+        className="p-3 bg-slate-950 border-t border-slate-800 flex items-center gap-2 shrink-0"
       >
         <input
           type="text"

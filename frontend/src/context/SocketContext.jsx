@@ -1,37 +1,28 @@
-import { createContext, useEffect, useState, useContext } from 'react';
-import { io } from 'socket.io-client';
-import { AuthContext } from './AuthContext';
+import { createContext, useEffect, useState } from "react";
+import { io } from "socket.io-client";
 
 export const SocketContext = createContext();
 
-const SOCKET_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+const SOCKET_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
 
 export const SocketProvider = ({ children }) => {
-    const [socket, setSocket] = useState(null);
-    const { user } = useContext(AuthContext);
+  const [socket, setSocket] = useState(null);
 
-    useEffect(() => {
-        // Initialize persistent bidirectional signaling connection
-        const newSocket = io(SOCKET_URL, {
-            autoConnect: false,
-            transports: ['websocket', 'polling']
-        });
-        setSocket(newSocket);
+  useEffect(() => {
+    const newSocket = io(SOCKET_URL, {
+      transports: ["websocket", "polling"],
+      withCredentials: true,
+    });
+    setSocket(newSocket);
 
-        return () => newSocket.close();
-    }, []);
+    return () => {
+      newSocket.disconnect();
+    };
+  }, []);
 
-    useEffect(() => {
-        if (socket && user) {
-            socket.connect();
-        } else if (socket && !user) {
-            socket.disconnect();
-        }
-    }, [socket, user]);
-
-    return (
-        <SocketContext.Provider value={{ socket }}>
-            {children}
-        </SocketContext.Provider>
-    );
+  return (
+    <SocketContext.Provider value={{ socket }}>
+      {children}
+    </SocketContext.Provider>
+  );
 };

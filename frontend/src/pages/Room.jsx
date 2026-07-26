@@ -14,6 +14,7 @@ import {
   Copy,
   Check,
   Users,
+  AlertTriangle,
 } from "lucide-react";
 
 const Room = () => {
@@ -23,15 +24,23 @@ const Room = () => {
   const navigate = useNavigate();
 
   const [roomDetails, setRoomDetails] = useState(null);
+  const [roomError, setRoomError] = useState(false);
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState("video");
   const [remoteStreams, setRemoteStreams] = useState([]);
+  const [participants, setParticipants] = useState([]);
 
   const userVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const peersRef = useRef({});
+
+  const currentUsername =
+    user?.username || `Peer-${Math.floor(Math.random() * 899 + 100)}`;
+  const currentUserId =
+    user?._id ||
+    `guest-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
 
   useEffect(() => {
     const fetchRoom = async () => {
@@ -39,13 +48,15 @@ const Room = () => {
         const { data } = await API.get(`/rooms/${roomId}`);
         setRoomDetails(data);
       } catch (err) {
-        console.error("Room error:", err);
+        setRoomError(true);
       }
     };
     fetchRoom();
   }, [roomId]);
 
   useEffect(() => {
+    if (roomError) return;
+
     const iceServers = {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -55,15 +66,17 @@ const Room = () => {
 
     const createPeer = (targetSocketId, callerUsername, stream) => {
       const peer = new RTCPeerConnection(iceServers);
-      stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+      if (stream) {
+        stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+      }
 
       peer.onicecandidate = (event) => {
-        if (event.candidate) {
+        if (event.candidate && socket) {
           socket.emit("webrtc-signal", {
             targetSocketId,
             signal: { type: "candidate", candidate: event.candidate },
-            callerId: user._id,
-            username: user.username,
+            callerId: currentUserId,
+            username: currentUsername,
           });
         }
       };
@@ -85,101 +98,126 @@ const Room = () => {
       return peer;
     };
 
-    navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
-      .then((stream) => {
+    const initSession = async () => {
+      let stream = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
         localStreamRef.current = stream;
         if (userVideoRef.current) {
           userVideoRef.current.srcObject = stream;
         }
+      } catch (err) {
+        console.warn(
+          "Media devices unaccessible, continuing in data-only mode:",
+          err,
+        );
+      }
 
-        if (socket && user) {
-          socket.emit("join-room", {
-            roomId,
-            userId: user._id,
-            username: user.username,
-          });
+      if (!socket) return;
 
-          socket.on("existing-users", (users) => {
-            users.forEach(async (remoteUser) => {
-              const peer = createPeer(
-                remoteUser.socketId,
-                remoteUser.username,
-                stream,
-              );
-              peersRef.current[remoteUser.socketId] = peer;
-              const offer = await peer.createOffer();
-              await peer.setLocalDescription(offer);
-              socket.emit("webrtc-signal", {
-                targetSocketId: remoteUser.socketId,
-                signal: { type: "offer", sdp: offer },
-                callerId: user._id,
-                username: user.username,
-              });
-            });
-          });
+      const handleJoin = () => {
+        socket.emit("join-room", {
+          roomId,
+          userId: currentUserId,
+          username: currentUsername,
+        });
+      };
 
-          socket.on(
-            "user-connected",
-            ({ socketId, username: remoteUsername }) => {
-              const peer = createPeer(socketId, remoteUsername, stream);
-              peersRef.current[socketId] = peer;
-            },
+      if (socket.connected) {
+        handleJoin();
+      } else {
+        socket.connect();
+        socket.once("connect", handleJoin);
+      }
+
+      socket.on("room-users-update", (usersList) => {
+        setParticipants(usersList);
+      });
+
+      socket.on("existing-users", (users) => {
+        users.forEach(async (remoteUser) => {
+          const peer = createPeer(
+            remoteUser.socketId,
+            remoteUser.username,
+            localStreamRef.current,
           );
+          peersRef.current[remoteUser.socketId] = peer;
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+          socket.emit("webrtc-signal", {
+            targetSocketId: remoteUser.socketId,
+            signal: { type: "offer", sdp: offer },
+            callerId: currentUserId,
+            username: currentUsername,
+          });
+        });
+      });
 
-          socket.on(
-            "webrtc-signal",
-            async ({
-              signal,
-              callerId: senderSocketId,
-              username: remoteUsername,
-            }) => {
-              let peer = peersRef.current[senderSocketId];
-              if (!peer) {
-                peer = createPeer(senderSocketId, remoteUsername, stream);
-                peersRef.current[senderSocketId] = peer;
-              }
+      socket.on("user-connected", ({ socketId, username: remoteUsername }) => {
+        const peer = createPeer(
+          socketId,
+          remoteUsername,
+          localStreamRef.current,
+        );
+        peersRef.current[socketId] = peer;
+      });
 
-              if (signal.type === "offer") {
-                await peer.setRemoteDescription(
-                  new RTCSessionDescription(signal.sdp),
-                );
-                const answer = await peer.createAnswer();
-                await peer.setLocalDescription(answer);
-                socket.emit("webrtc-signal", {
-                  targetSocketId: senderSocketId,
-                  signal: { type: "answer", sdp: answer },
-                  callerId: user._id,
-                  username: user.username,
-                });
-              } else if (signal.type === "answer") {
-                await peer.setRemoteDescription(
-                  new RTCSessionDescription(signal.sdp),
-                );
-              } else if (signal.type === "candidate") {
-                try {
-                  await peer.addIceCandidate(
-                    new RTCIceCandidate(signal.candidate),
-                  );
-                } catch (e) {
-                  console.error("ICE error", e);
-                }
-              }
-            },
-          );
-
-          socket.on("user-disconnected", (socketId) => {
-            if (peersRef.current[socketId]) {
-              peersRef.current[socketId].close();
-              delete peersRef.current[socketId];
-            }
-            setRemoteStreams((prev) =>
-              prev.filter((p) => p.socketId !== socketId),
+      socket.on(
+        "webrtc-signal",
+        async ({
+          signal,
+          callerId: senderSocketId,
+          username: remoteUsername,
+        }) => {
+          let peer = peersRef.current[senderSocketId];
+          if (!peer) {
+            peer = createPeer(
+              senderSocketId,
+              remoteUsername,
+              localStreamRef.current,
             );
-          });
+            peersRef.current[senderSocketId] = peer;
+          }
+
+          if (signal.type === "offer") {
+            await peer.setRemoteDescription(
+              new RTCSessionDescription(signal.sdp),
+            );
+            const answer = await peer.createAnswer();
+            await peer.setLocalDescription(answer);
+            socket.emit("webrtc-signal", {
+              targetSocketId: senderSocketId,
+              signal: { type: "answer", sdp: answer },
+              callerId: currentUserId,
+              username: currentUsername,
+            });
+          } else if (signal.type === "answer") {
+            await peer.setRemoteDescription(
+              new RTCSessionDescription(signal.sdp),
+            );
+          } else if (signal.type === "candidate") {
+            try {
+              await peer.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            } catch (e) {
+              console.error("ICE error", e);
+            }
+          }
+        },
+      );
+
+      socket.on("user-disconnected", (socketId) => {
+        if (peersRef.current[socketId]) {
+          peersRef.current[socketId].close();
+          delete peersRef.current[socketId];
         }
-      })
-      .catch((err) => console.error("Camera access error:", err));
+        setRemoteStreams((prev) => prev.filter((p) => p.socketId !== socketId));
+      });
+    };
+
+    initSession();
 
     return () => {
       if (localStreamRef.current) {
@@ -188,13 +226,14 @@ const Room = () => {
       Object.values(peersRef.current).forEach((peer) => peer.close());
       peersRef.current = {};
       if (socket) {
+        socket.off("room-users-update");
         socket.off("existing-users");
         socket.off("user-connected");
         socket.off("webrtc-signal");
         socket.off("user-disconnected");
       }
     };
-  }, [socket, user, roomId]);
+  }, [socket, roomId, roomError]);
 
   const toggleMic = () => {
     if (localStreamRef.current) {
@@ -229,14 +268,43 @@ const Room = () => {
     navigate("/");
   };
 
+  if (roomError) {
+    return (
+      <div className="h-[calc(100vh-73px)] bg-slate-950 flex flex-col items-center justify-center p-6 text-center text-white">
+        <AlertTriangle className="w-16 h-16 text-rose-500 mb-4 animate-bounce" />
+        <h2 className="text-2xl font-bold font-mono tracking-tight">
+          ACCESS DENIED // ROOM NOT FOUND
+        </h2>
+        <p className="text-slate-400 text-sm mt-2 max-w-md font-mono">
+          The requested room ID does not exist in the active database registry.
+        </p>
+        <button
+          onClick={() => navigate("/")}
+          className="mt-6 px-6 py-3 bg-white text-slate-950 font-mono font-bold text-xs uppercase tracking-widest rounded-sm"
+        >
+          Return to Dashboard
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="h-[calc(100vh-73px)] bg-slate-950 text-slate-100 flex flex-col overflow-hidden">
-      <div className="bg-slate-900 border-b border-slate-800 px-6 py-3.5 flex flex-wrap items-center justify-between gap-4 shrink-0">
+      <div className="bg-slate-900 border-b border-slate-800 px-6 py-3 flex flex-wrap items-center justify-between gap-4 shrink-0">
         <div>
-          <h2 className="font-bold text-base text-white font-mono uppercase tracking-wider">
-            {roomDetails?.roomName || "ACTIVE ROOM"}
-          </h2>
-          <div className="flex items-center space-x-2 text-xs font-mono text-slate-400 mt-0.5">
+          <div className="flex items-center space-x-3">
+            <h2 className="font-bold text-base text-white font-mono uppercase tracking-wider">
+              {roomDetails?.roomName || "CONNECTING..."}
+            </h2>
+            <div className="hidden sm:flex items-center space-x-1.5 px-2 py-0.5 bg-slate-950 border border-slate-800 rounded-sm text-[11px] font-mono text-emerald-400">
+              <span className="w-2 h-2 bg-emerald-500 rounded-full inline-block animate-pulse"></span>
+              <span>
+                PEERS ({participants.length}):{" "}
+                {participants.map((p) => p.username).join(", ") || "Only You"}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 text-xs font-mono text-slate-400 mt-1">
             <span>
               ROOM ID: <strong className="text-blue-400">{roomId}</strong>
             </span>
@@ -271,9 +339,19 @@ const Room = () => {
         </div>
       </div>
 
+      <div className="sm:hidden bg-slate-950 border-b border-slate-800 px-4 py-2 font-mono text-[11px] text-emerald-400 flex items-center space-x-2">
+        <span className="w-2 h-2 bg-emerald-500 rounded-full inline-block animate-pulse"></span>
+        <span className="truncate">
+          ONLINE ({participants.length}):{" "}
+          {participants.map((p) => p.username).join(", ") || "Only You"}
+        </span>
+      </div>
+
       <div className="flex-1 p-4 sm:p-6 overflow-hidden flex flex-col items-center justify-center">
-        {activeTab === "video" && (
-          <div className="w-full h-full max-w-6xl grid grid-cols-1 md:grid-cols-2 gap-4 my-auto overflow-y-auto p-2">
+        <div
+          className={`w-full h-full max-w-6xl overflow-y-auto p-2 ${activeTab === "video" ? "block" : "hidden"}`}
+        >
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-full items-center">
             <div className="relative bg-slate-900 border border-slate-800 aspect-video rounded-sm overflow-hidden flex items-center justify-center shadow-lg max-h-[420px] mx-auto w-full">
               <video
                 ref={userVideoRef}
@@ -284,7 +362,7 @@ const Room = () => {
               />
               <div className="absolute bottom-3 left-3 bg-slate-950/90 border border-slate-800 px-3 py-1 font-mono text-xs text-white rounded-sm flex items-center space-x-2">
                 <span className="w-2 h-2 bg-emerald-500 rounded-full inline-block"></span>
-                <span>{user?.username} (You)</span>
+                <span>{currentUsername} (You)</span>
               </div>
             </div>
 
@@ -294,10 +372,11 @@ const Room = () => {
                   <Users className="w-5 h-5 text-blue-500" />
                 </div>
                 <p className="font-mono text-sm text-slate-300 font-bold uppercase tracking-wide">
-                  Waiting for peers...
+                  Waiting for peer streams...
                 </p>
                 <p className="font-mono text-xs text-slate-500 mt-1">
-                  Share Room ID with your team to initiate P2P mesh connection.
+                  If peers are online above, video mesh is negotiating P2P
+                  connection.
                 </p>
               </div>
             ) : (
@@ -322,19 +401,19 @@ const Room = () => {
               ))
             )}
           </div>
-        )}
+        </div>
 
-        {activeTab === "whiteboard" && (
-          <div className="w-full h-full max-w-6xl">
-            <Whiteboard socket={socket} roomId={roomId} />
-          </div>
-        )}
+        <div
+          className={`w-full h-full max-w-6xl ${activeTab === "whiteboard" ? "block" : "hidden"}`}
+        >
+          <Whiteboard socket={socket} roomId={roomId} />
+        </div>
 
-        {activeTab === "chat" && (
-          <div className="w-full h-full max-w-3xl">
-            <ChatBox socket={socket} roomId={roomId} user={user} />
-          </div>
-        )}
+        <div
+          className={`w-full h-full max-w-3xl ${activeTab === "chat" ? "block" : "hidden"}`}
+        >
+          <ChatBox socket={socket} roomId={roomId} user={user} />
+        </div>
       </div>
 
       <div className="bg-slate-900 border-t border-slate-800 px-6 py-3.5 flex items-center justify-center space-x-4 shrink-0">
@@ -345,7 +424,6 @@ const Room = () => {
               ? "bg-slate-800 border-slate-700 text-white"
               : "bg-rose-500/20 border-rose-500/40 text-rose-400"
           }`}
-          title={micOn ? "Mute Microphone" : "Unmute Microphone"}
         >
           {micOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
         </button>
@@ -357,7 +435,6 @@ const Room = () => {
               ? "bg-slate-800 border-slate-700 text-white"
               : "bg-rose-500/20 border-rose-500/40 text-rose-400"
           }`}
-          title={cameraOn ? "Turn Off Camera" : "Turn On Camera"}
         >
           {cameraOn ? (
             <VideoIcon className="w-5 h-5" />
