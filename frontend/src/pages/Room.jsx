@@ -61,8 +61,8 @@ const Room = () => {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
-        { urls: "stun:stun2.l.google.com:19302" },
-        { urls: "stun:stun3.l.google.com:19302" },
+        { urls: "stun:stun.cloudflare.com:3478" },
+        { urls: "stun:openrelay.metered.ca:80" },
       ],
     };
 
@@ -74,6 +74,9 @@ const Room = () => {
         localStreamRef.current.getTracks().forEach((track) => {
           peer.addTrack(track, localStreamRef.current);
         });
+      } else {
+        peer.addTransceiver("video", { direction: "recvonly" });
+        peer.addTransceiver("audio", { direction: "recvonly" });
       }
 
       peer.onicecandidate = (event) => {
@@ -89,9 +92,16 @@ const Room = () => {
 
       peer.ontrack = (event) => {
         setRemoteStreams((prev) => {
-          const filtered = prev.filter((p) => p.socketId !== targetSocketId);
+          const existing = prev.find((p) => p.socketId === targetSocketId);
+          if (existing) {
+            return prev.map((p) =>
+              p.socketId === targetSocketId
+                ? { ...p, stream: event.streams[0] }
+                : p,
+            );
+          }
           return [
-            ...filtered,
+            ...prev,
             {
               socketId: targetSocketId,
               stream: event.streams[0],
@@ -354,7 +364,7 @@ const Room = () => {
 
         <div className="flex items-center space-x-2 bg-slate-950 border border-slate-800 p-1 rounded-sm">
           {[
-            { id: "video", label: `Video Grid (${remoteStreams.length + 1})` },
+            { id: "video", label: `Video Grid (${participants.length + 1})` },
             { id: "whiteboard", label: "Whiteboard" },
             { id: "chat", label: "Live Chat" },
           ].map((tab) => (
@@ -393,45 +403,83 @@ const Room = () => {
                 playsInline
                 className="w-full h-full object-cover"
               />
-              <div className="absolute bottom-3 left-3 bg-slate-950/90 border border-slate-800 px-3 py-1 font-mono text-xs text-white rounded-sm flex items-center space-x-2">
+              {!cameraOn && (
+                <div className="absolute inset-0 bg-slate-900 flex flex-col items-center justify-center">
+                  <div className="w-16 h-16 rounded-full bg-emerald-600/20 border border-emerald-500 flex items-center justify-center text-emerald-400 font-mono text-2xl font-bold mb-2 shadow-inner">
+                    {currentUsername.charAt(0).toUpperCase()}
+                  </div>
+                  <span className="text-xs font-mono text-slate-400 uppercase">
+                    Camera Off
+                  </span>
+                </div>
+              )}
+              <div className="absolute bottom-3 left-3 bg-slate-950/90 border border-slate-800 px-3 py-1 font-mono text-xs text-white rounded-sm flex items-center space-x-2 z-10">
                 <span className="w-2 h-2 bg-emerald-500 rounded-full inline-block"></span>
                 <span>{currentUsername} (You)</span>
               </div>
             </div>
 
-            {remoteStreams.length === 0 ? (
+            {participants.length === 0 ? (
               <div className="relative bg-slate-900/40 border border-slate-800 aspect-video rounded-sm flex flex-col items-center justify-center p-6 text-center max-h-[420px] mx-auto w-full">
                 <div className="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500 mb-3">
                   <Users className="w-5 h-5 text-blue-500" />
                 </div>
                 <p className="font-mono text-sm text-slate-300 font-bold uppercase tracking-wide">
-                  Waiting for peer streams...
+                  Waiting for peers to join...
                 </p>
                 <p className="font-mono text-xs text-slate-500 mt-1">
-                  If peers are online above, video mesh is negotiating P2P
-                  connection.
+                  Share Room ID with your team to initiate session.
                 </p>
               </div>
             ) : (
-              remoteStreams.map((remote) => (
-                <div
-                  key={remote.socketId}
-                  className="relative bg-slate-900 border border-slate-800 aspect-video rounded-sm overflow-hidden flex items-center justify-center shadow-lg max-h-[420px] mx-auto w-full"
-                >
-                  <video
-                    ref={(ref) => {
-                      if (ref) ref.srcObject = remote.stream;
-                    }}
-                    autoPlay
-                    playsInline
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute bottom-3 left-3 bg-slate-950/90 border border-slate-800 px-3 py-1 font-mono text-xs text-white rounded-sm flex items-center space-x-2">
-                    <span className="w-2 h-2 bg-blue-500 rounded-full inline-block animate-pulse"></span>
-                    <span>{remote.username} (Peer)</span>
+              participants.map((participant) => {
+                const peerStreamObj = remoteStreams.find(
+                  (r) => r.socketId === participant.socketId,
+                );
+                const stream = peerStreamObj?.stream;
+
+                return (
+                  <div
+                    key={participant.socketId}
+                    className="relative bg-slate-900 border border-slate-800 aspect-video rounded-sm overflow-hidden flex items-center justify-center shadow-lg max-h-[420px] mx-auto w-full"
+                  >
+                    {stream ? (
+                      <video
+                        ref={(ref) => {
+                          if (ref && ref.srcObject !== stream)
+                            ref.srcObject = stream;
+                        }}
+                        autoPlay
+                        playsInline
+                        className="w-full h-full object-cover"
+                      />
+                    ) : null}
+
+                    {!stream && (
+                      <div className="absolute inset-0 bg-slate-900 flex flex-col items-center justify-center p-6 text-center">
+                        <div className="w-16 h-16 rounded-full bg-blue-600/20 border border-blue-500 flex items-center justify-center text-blue-400 font-mono text-2xl font-bold mb-3 shadow-inner">
+                          {participant.username
+                            ? participant.username.charAt(0).toUpperCase()
+                            : "?"}
+                        </div>
+                        <p className="font-mono text-sm text-slate-300 font-bold">
+                          {participant.username}
+                        </p>
+                        <span className="mt-1 px-2 py-0.5 bg-slate-950 border border-slate-800 text-[10px] font-mono text-amber-400 rounded-sm animate-pulse">
+                          Connecting Media / Cam Off
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="absolute bottom-3 left-3 bg-slate-950/90 border border-slate-800 px-3 py-1 font-mono text-xs text-white rounded-sm flex items-center space-x-2 z-10">
+                      <span
+                        className={`w-2 h-2 rounded-full inline-block ${stream ? "bg-blue-500 animate-pulse" : "bg-amber-500"}`}
+                      ></span>
+                      <span>{participant.username} (Peer)</span>
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
