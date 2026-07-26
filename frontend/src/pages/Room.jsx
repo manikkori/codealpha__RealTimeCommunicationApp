@@ -60,14 +60,20 @@ const Room = () => {
     const iceServers = {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:global.stun.twilio.com:3478" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun2.l.google.com:19302" },
+        { urls: "stun:stun3.l.google.com:19302" },
       ],
     };
 
-    const createPeer = (targetSocketId, callerUsername, stream) => {
+    const createPeer = (targetSocketId, callerUsername) => {
       const peer = new RTCPeerConnection(iceServers);
-      if (stream) {
-        stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+      peer.iceQueue = [];
+
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => {
+          peer.addTrack(track, localStreamRef.current);
+        });
       }
 
       peer.onicecandidate = (event) => {
@@ -83,9 +89,9 @@ const Room = () => {
 
       peer.ontrack = (event) => {
         setRemoteStreams((prev) => {
-          if (prev.some((p) => p.socketId === targetSocketId)) return prev;
+          const filtered = prev.filter((p) => p.socketId !== targetSocketId);
           return [
-            ...prev,
+            ...filtered,
             {
               socketId: targetSocketId,
               stream: event.streams[0],
@@ -99,9 +105,8 @@ const Room = () => {
     };
 
     const initSession = async () => {
-      let stream = null;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
           video: true,
           audio: true,
         });
@@ -134,34 +139,35 @@ const Room = () => {
       }
 
       socket.on("room-users-update", (usersList) => {
-        setParticipants(usersList);
+        setParticipants(usersList.filter((u) => u.socketId !== socket.id));
       });
 
       socket.on("existing-users", (users) => {
+        setParticipants(users);
         users.forEach(async (remoteUser) => {
-          const peer = createPeer(
-            remoteUser.socketId,
-            remoteUser.username,
-            localStreamRef.current,
-          );
+          const peer = createPeer(remoteUser.socketId, remoteUser.username);
           peersRef.current[remoteUser.socketId] = peer;
-          const offer = await peer.createOffer();
-          await peer.setLocalDescription(offer);
-          socket.emit("webrtc-signal", {
-            targetSocketId: remoteUser.socketId,
-            signal: { type: "offer", sdp: offer },
-            callerId: currentUserId,
-            username: currentUsername,
-          });
+          try {
+            const offer = await peer.createOffer();
+            await peer.setLocalDescription(offer);
+            socket.emit("webrtc-signal", {
+              targetSocketId: remoteUser.socketId,
+              signal: { type: "offer", sdp: offer },
+              callerId: currentUserId,
+              username: currentUsername,
+            });
+          } catch (e) {
+            console.error("Offer error:", e);
+          }
         });
       });
 
       socket.on("user-connected", ({ socketId, username: remoteUsername }) => {
-        const peer = createPeer(
-          socketId,
-          remoteUsername,
-          localStreamRef.current,
-        );
+        setParticipants((prev) => {
+          if (prev.some((p) => p.socketId === socketId)) return prev;
+          return [...prev, { socketId, username: remoteUsername }];
+        });
+        const peer = createPeer(socketId, remoteUsername);
         peersRef.current[socketId] = peer;
       });
 
@@ -174,35 +180,58 @@ const Room = () => {
         }) => {
           let peer = peersRef.current[senderSocketId];
           if (!peer) {
-            peer = createPeer(
-              senderSocketId,
-              remoteUsername,
-              localStreamRef.current,
-            );
+            peer = createPeer(senderSocketId, remoteUsername);
             peersRef.current[senderSocketId] = peer;
           }
 
           if (signal.type === "offer") {
-            await peer.setRemoteDescription(
-              new RTCSessionDescription(signal.sdp),
-            );
-            const answer = await peer.createAnswer();
-            await peer.setLocalDescription(answer);
-            socket.emit("webrtc-signal", {
-              targetSocketId: senderSocketId,
-              signal: { type: "answer", sdp: answer },
-              callerId: currentUserId,
-              username: currentUsername,
-            });
+            try {
+              await peer.setRemoteDescription(
+                new RTCSessionDescription(signal.sdp),
+              );
+              if (peer.iceQueue) {
+                for (const candidate of peer.iceQueue) {
+                  await peer.addIceCandidate(new RTCIceCandidate(candidate));
+                }
+                peer.iceQueue = [];
+              }
+              const answer = await peer.createAnswer();
+              await peer.setLocalDescription(answer);
+              socket.emit("webrtc-signal", {
+                targetSocketId: senderSocketId,
+                signal: { type: "answer", sdp: answer },
+                callerId: currentUserId,
+                username: currentUsername,
+              });
+            } catch (e) {
+              console.error("Offer handle error:", e);
+            }
           } else if (signal.type === "answer") {
-            await peer.setRemoteDescription(
-              new RTCSessionDescription(signal.sdp),
-            );
+            try {
+              await peer.setRemoteDescription(
+                new RTCSessionDescription(signal.sdp),
+              );
+              if (peer.iceQueue) {
+                for (const candidate of peer.iceQueue) {
+                  await peer.addIceCandidate(new RTCIceCandidate(candidate));
+                }
+                peer.iceQueue = [];
+              }
+            } catch (e) {
+              console.error("Answer handle error:", e);
+            }
           } else if (signal.type === "candidate") {
             try {
-              await peer.addIceCandidate(new RTCIceCandidate(signal.candidate));
+              if (peer.remoteDescription && peer.remoteDescription.type) {
+                await peer.addIceCandidate(
+                  new RTCIceCandidate(signal.candidate),
+                );
+              } else {
+                peer.iceQueue = peer.iceQueue || [];
+                peer.iceQueue.push(signal.candidate);
+              }
             } catch (e) {
-              console.error("ICE error", e);
+              console.error("ICE error:", e);
             }
           }
         },
@@ -214,6 +243,7 @@ const Room = () => {
           delete peersRef.current[socketId];
         }
         setRemoteStreams((prev) => prev.filter((p) => p.socketId !== socketId));
+        setParticipants((prev) => prev.filter((p) => p.socketId !== socketId));
       });
     };
 
@@ -288,6 +318,11 @@ const Room = () => {
     );
   }
 
+  const peersDisplayText =
+    participants.length === 0
+      ? `${currentUsername} (You)`
+      : `${currentUsername} (You), ${participants.map((p) => p.username).join(", ")}`;
+
   return (
     <div className="h-[calc(100vh-73px)] bg-slate-950 text-slate-100 flex flex-col overflow-hidden">
       <div className="bg-slate-900 border-b border-slate-800 px-6 py-3 flex flex-wrap items-center justify-between gap-4 shrink-0">
@@ -299,8 +334,7 @@ const Room = () => {
             <div className="hidden sm:flex items-center space-x-1.5 px-2 py-0.5 bg-slate-950 border border-slate-800 rounded-sm text-[11px] font-mono text-emerald-400">
               <span className="w-2 h-2 bg-emerald-500 rounded-full inline-block animate-pulse"></span>
               <span>
-                PEERS ({participants.length}):{" "}
-                {participants.map((p) => p.username).join(", ") || "Only You"}
+                PEERS ({participants.length + 1}): {peersDisplayText}
               </span>
             </div>
           </div>
@@ -342,8 +376,7 @@ const Room = () => {
       <div className="sm:hidden bg-slate-950 border-b border-slate-800 px-4 py-2 font-mono text-[11px] text-emerald-400 flex items-center space-x-2">
         <span className="w-2 h-2 bg-emerald-500 rounded-full inline-block animate-pulse"></span>
         <span className="truncate">
-          ONLINE ({participants.length}):{" "}
-          {participants.map((p) => p.username).join(", ") || "Only You"}
+          ONLINE ({participants.length + 1}): {peersDisplayText}
         </span>
       </div>
 

@@ -2,13 +2,17 @@ const socketHandler = (io) => {
   const roomUsers = {};
 
   io.on("connection", (socket) => {
-    // Handle WebRTC peer signaling and room mesh topology
     socket.on("join-room", ({ roomId, userId, username }) => {
       socket.join(roomId);
       if (!roomUsers[roomId]) {
         roomUsers[roomId] = [];
       }
+      roomUsers[roomId] = roomUsers[roomId].filter(
+        (u) => u.socketId !== socket.id && u.userId !== userId,
+      );
       roomUsers[roomId].push({ socketId: socket.id, userId, username });
+
+      io.to(roomId).emit("room-users-update", roomUsers[roomId]);
 
       socket.to(roomId).emit("user-connected", {
         socketId: socket.id,
@@ -20,13 +24,6 @@ const socketHandler = (io) => {
         "existing-users",
         roomUsers[roomId].filter((u) => u.socketId !== socket.id),
       );
-
-      socket.on("disconnect", () => {
-        roomUsers[roomId] = roomUsers[roomId]?.filter(
-          (u) => u.socketId !== socket.id,
-        );
-        socket.to(roomId).emit("user-disconnected", socket.id);
-      });
     });
 
     socket.on(
@@ -47,6 +44,19 @@ const socketHandler = (io) => {
 
     socket.on("whiteboard-draw", ({ roomId, drawData }) => {
       socket.to(roomId).emit("whiteboard-draw", drawData);
+    });
+
+    socket.on("disconnect", () => {
+      for (const roomId in roomUsers) {
+        const initialLen = roomUsers[roomId].length;
+        roomUsers[roomId] = roomUsers[roomId].filter(
+          (u) => u.socketId !== socket.id,
+        );
+        if (roomUsers[roomId].length !== initialLen) {
+          io.to(roomId).emit("room-users-update", roomUsers[roomId]);
+          socket.to(roomId).emit("user-disconnected", socket.id);
+        }
+      }
     });
   });
 };
